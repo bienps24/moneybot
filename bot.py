@@ -130,20 +130,15 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     await send_content(context.bot, user.id, user.id, state)
 
 
-# ── /start ────────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    chat_id = update.effective_chat.id
-    state   = get_state(user.id)
-    state["messages"]    = [update.message.message_id]
-    state["more_shares"] = 0
 
-    await send_content(context.bot, chat_id, user.id, state)
 
 
 # ── AUTO REPLY "SHARE!" TO ANY USER MESSAGE ───────────────────────────────────
 async def auto_reply_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id == ADMIN_ID:
+        return
+    # Only reply to users who came through channel join request
+    if update.effective_user.id not in user_states:
         return
     state = get_state(update.effective_user.id)
     msg = await update.message.reply_text("SHARE!")
@@ -176,7 +171,6 @@ async def test_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("testvideo", test_video))
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply_share))
