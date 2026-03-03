@@ -102,23 +102,27 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Cannot DM {user.id}: {e}")
         return
 
-    # Notify admin
+    # Auto-approve join request and send content immediately
+    try:
+        await context.bot.approve_chat_join_request(chat_id=CHANNEL_ID, user_id=user.id)
+    except Exception as e:
+        logger.warning(f"approve_chat_join_request: {e}")
+
+    # Notify admin (info only, no buttons needed)
     uname = f"@{user.username}" if user.username else "_(no username)_"
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
-            f"🔔 *New Join Request*\n\n"
+            f"🔔 *New User Auto-Approved*\n\n"
             f"👤 Name: {user.full_name or 'Unknown'}\n"
             f"🆔 ID: `{user.id}`\n"
-            f"📎 Username: {uname}\n\n"
-            f"Approve to send them videos?"
+            f"📎 Username: {uname}"
         ),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅  APPROVE", callback_data=f"approve:{user.id}:{user.id}"),
-            InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{user.id}"),
-        ]])
     )
+
+    state["phase"] = "content"
+    await send_first_content(context.bot, user.id, user.id, state)
 
 # ── /start ────────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
