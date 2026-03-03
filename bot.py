@@ -1,27 +1,30 @@
 """
-Telegram Bot — Admin Approval Version
-======================================
+Telegram Bot — Auto DM on Channel Join + Admin Approval
+=========================================================
 Flow:
-  User /start → Bot greets user → Admin gets notification card
-  Admin taps ✅ APPROVE → Bot sends 2 protected videos to user
-  Admin taps ❌ REJECT  → Bot sends rejection + pay button
+  User joins channel → Bot auto-DMs them the promo message
+  Admin sees notification → Taps ✅ APPROVE or ❌ REJECT
+  If bot cannot DM (user never started bot) → Bot posts in channel
+  tagging the user to start the bot first
 
 Railway env vars needed:
-  BOT_TOKEN, ADMIN_ID, CHANNEL_LINK, PAYMENT_LINK,
-  VIDEO_1_ID, VIDEO_2_ID, EXTRA_VIDEO_IDS
+  BOT_TOKEN, ADMIN_ID, CHANNEL_ID, CHANNEL_LINK,
+  PAYMENT_LINK, VIDEO_1_ID, VIDEO_2_ID, EXTRA_VIDEO_IDS
 """
 import asyncio
 import logging
 import os
 from urllib.parse import quote
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     ContextTypes,
 )
+from telegram.error import Forbidden, BadRequest
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,7 +34,8 @@ logger = logging.getLogger(__name__)
 
 # ── ENV VARS — set all of these in Railway → Variables ────────────────────────
 BOT_TOKEN       = os.environ["BOT_TOKEN"]
-ADMIN_ID        = int(os.environ["ADMIN_ID"])           # Your Telegram numeric ID
+ADMIN_ID        = int(os.environ["ADMIN_ID"])
+CHANNEL_ID      = int(os.environ["CHANNEL_ID"])        # e.g. -1001234567890
 CHANNEL_LINK    = os.environ.get("CHANNEL_LINK", "https://t.me/+Xb2fi4Gr00c3MTdl")
 PAYMENT_LINK    = os.environ.get("PAYMENT_LINK", "https://t.me/your_payment_bot")
 VIDEO_1_ID      = os.environ.get("VIDEO_1_ID", "")
@@ -41,6 +45,8 @@ EXTRA_VIDEO_IDS = os.environ.get("EXTRA_VIDEO_IDS", "").split(",")
 VIDEO_DELETE_DELAY = 30   # seconds before videos are deleted
 CHAT_DELETE_DELAY  = 120  # seconds before entire chat is wiped
 
+BOT_LINK = "https://t.me/Xetuu18bot?start=ref"
+
 # ── IN-MEMORY STATE ───────────────────────────────────────────────────────────
 user_states: dict[int, dict] = {}
 
@@ -48,21 +54,20 @@ user_states: dict[int, dict] = {}
 def get_state(uid: int) -> dict:
     if uid not in user_states:
         user_states[uid] = {
-            "messages":       [],   # all message ids in user chat
-            "phase":          "waiting",
-            "more_shares":    0,
+            "messages":    [],
+            "phase":       "waiting",
+            "more_shares": 0,
         }
     return user_states[uid]
 
 
 def share_url() -> str:
     text = "join our exclusive group"
-    return f"https://t.me/share/url?url={quote(CHANNEL_LINK)}&text={quote(text)}"
+    return f"https://t.me/share/url?url={quote(BOT_LINK)}&text={quote(text)}"
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 async def schedule_delete(bot, chat_id: int, message_ids: list[int], delay: int):
-    """Delete a list of messages after `delay` seconds."""
     await asyncio.sleep(delay)
     for mid in message_ids:
         try:
@@ -71,19 +76,14 @@ async def schedule_delete(bot, chat_id: int, message_ids: list[int], delay: int)
             pass
 
 
-# ── /start ────────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    chat_id = update.effective_chat.id
-    state   = get_state(user.id)
-
-    # Reset state
-    state["messages"]    = [update.message.message_id]
+async def greet_user(bot, user, chat_id: int):
+    """Send the promo message to the user and notify admin."""
+    state = get_state(user.id)
+    state["messages"]    = []
     state["phase"]       = "waiting"
     state["more_shares"] = 0
 
-    # 1️⃣  Greet the user — show the promo message
-    msg = await context.bot.send_message(
+    msg = await bot.send_message(
         chat_id=chat_id,
         text=(
             "🚫 *CHANNEL IS PRIVATE*\n\n"
@@ -102,11 +102,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     state["messages"].append(msg.message_id)
 
-    # 2️⃣  Notify admin — show user info + Approve / Reject buttons
     username  = f"@{user.username}" if user.username else "_(no username)_"
     full_name = user.full_name or "Unknown"
 
-    await context.bot.send_message(
+    await bot.send_message(
         chat_id=ADMIN_ID,
         text=(
             f"🔔 *New Access Request*\n\n"
@@ -121,7 +120,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{chat_id}"),
         ]])
     )
-    logger.info(f"New request from {user.id} ({full_name}) — awaiting admin decision.")
+    logger.info(f"Greeted {user.id} ({full_name})")
+
+
+# ── NEW CHANNEL MEMBER HANDLER ────────────────────────────────────────────────
+async def new_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered when someone joins the channel."""
+    result: ChatMemberUpdated = update.chat_member
+
+    # Only care about our channel
+    if result.chat.id != CHANNEL_ID:
+        return
+
+    old_status = result.old_chat_member.status
+    new_status = result.new_chat_member.status
+
+    # Detect join: was not member, now is member
+    joined = (
+        old_status in ("left", "kicked", "restricted")
+        and new_status in ("member", "administrator", "creator")
+    )
+    if not joined:
+        return
+
+    user = result.new_chat_member.user
+    if user.is_bot:
+        return
+
+    logger.info(f"User {user.id} ({user.full_name}) joined channel — sending DM.")
+
+    try:
+        # Try to DM the user directly
+        await greet_user(context.bot, user, user.id)
+
+    except (Forbidden, BadRequest):
+        # User never started the bot — cannot DM them
+        # Post in channel tagging them to start the bot
+        logger.warning(f"Cannot DM {user.id} — posting in channel instead.")
+        try:
+            msg = await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=(
+                    f"👋 Welcome [{user.full_name}](tg://user?id={user.id})\\!\n\n"
+                    f"To receive your content, please start our bot first:\n"
+                    f"👉 [Click here to start]({BOT_LINK})"
+                ),
+                parse_mode="MarkdownV2",
+            )
+            # Auto-delete the welcome message after 60 seconds
+            asyncio.create_task(
+                schedule_delete(context.bot, CHANNEL_ID, [msg.message_id], 60)
+            )
+        except Exception as e:
+            logger.error(f"Channel post error: {e}")
+
+
+# ── /start (also handles users who click the bot link) ───────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user    = update.effective_user
+    chat_id = update.effective_chat.id
+
+    await greet_user(context.bot, user, chat_id)
 
 
 # ── ADMIN: APPROVE ────────────────────────────────────────────────────────────
@@ -139,20 +198,17 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state   = get_state(uid)
     state["phase"] = "content"
 
-    # Update the admin's card
     await query.edit_message_text(
         query.message.text + "\n\n✅ *APPROVED — content sent.*",
         parse_mode="Markdown",
     )
 
-    # Tell user they're in
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text="✅ *You have been approved\\!* Sending your content now\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
     state["messages"].append(msg.message_id)
-
     await send_first_content(context.bot, chat_id, uid, state)
 
 
@@ -200,7 +256,7 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
                 msg = await bot.send_video(
                     chat_id=chat_id,
                     video=vid_id,
-                    protect_content=True,    # 🔒 no forward / no save
+                    protect_content=True,
                     supports_streaming=True,
                 )
                 video_msgs.append(msg.message_id)
@@ -208,7 +264,6 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
             except Exception as e:
                 logger.error(f"Video send error: {e}")
 
-    # Buttons sent SEPARATELY from the videos (as per original design)
     needed   = 3
     info_msg = await bot.send_message(
         chat_id=chat_id,
@@ -226,15 +281,13 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
     )
     state["messages"].append(info_msg.message_id)
 
-    # 🗑 Videos auto-delete after 30 s
     asyncio.create_task(schedule_delete(bot, chat_id, video_msgs, VIDEO_DELETE_DELAY))
-    # 🗑 Entire chat wipe after 2 min
     asyncio.create_task(
         schedule_delete(bot, chat_id, list(state["messages"]), CHAT_DELETE_DELAY)
     )
 
 
-# ── MORE CONTENT (share 3x) ───────────────────────────────────────────────────
+# ── MORE CONTENT ──────────────────────────────────────────────────────────────
 async def more_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("✅ Share registered!")
@@ -244,7 +297,6 @@ async def more_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = int(chat_id_str)
     state   = get_state(uid)
 
-    # Only the correct user can tap their own button
     if query.from_user.id != uid:
         return
 
@@ -327,11 +379,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(ChatMemberHandler(new_channel_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(handle_reject,  pattern=r"^reject:"))
     app.add_handler(CallbackQueryHandler(more_confirm,   pattern=r"^more:"))
 
-    logger.info("Bot is running — admin approval mode.")
+    logger.info("Bot running — channel join detection active.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
