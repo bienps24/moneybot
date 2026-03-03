@@ -27,6 +27,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ChatJoinRequestHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
@@ -47,7 +49,7 @@ VIDEO_2_ID      = os.environ.get("VIDEO_2_ID", "")
 EXTRA_VIDEO_IDS = os.environ.get("EXTRA_VIDEO_IDS", "").split(",")
 
 VIDEO_DELETE_DELAY = 30   # seconds
-CHAT_DELETE_DELAY  = 120  # seconds
+CHAT_DELETE_DELAY  = 1800  # 30 minutes
 
 BOT_LINK = "https://t.me/Xetuu18bot?start=ref"
 
@@ -67,7 +69,7 @@ def get_state(uid: int) -> dict:
 
 def share_url() -> str:
     text = "join our exclusive group"
-    return f"https://t.me/share/url?url={quote(BOT_LINK)}&text={quote(text)}"
+    return f"https://t.me/share/url?url={quote(CHANNEL_LINK)}&text={quote(text)}"
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -109,7 +111,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "🚫 *CHANNEL IS PRIVATE*\n\n"
                 "🍌💦 *SHARE \\= CONTENT*\n\n"
                 "0 / 2 JOIN\n\n"
-                "\\(SHARE\\) CHANNEL \\— *55,568 VIDEOS*\n\n"
+                "\\(SHARE\\) CHANNEL — 55,568 VIDEOS\n\n"
                 "SHARE TO 2 GROUPS TO UNLOCK\n\n"
                 "Verification is automatic ❤️\n\n"
                 "━━━━━━━━━━━━━━━━\n"
@@ -162,7 +164,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🚫 *CHANNEL IS PRIVATE*\n\n"
             "🍌💦 *SHARE \\= CONTENT*\n\n"
             "0 / 2 JOIN\n\n"
-            "\\(SHARE\\) CHANNEL \\— *55,568 VIDEOS*\n\n"
+            "\\(SHARE\\) CHANNEL — 55,568 VIDEOS\n\n"
             "SHARE TO 2 GROUPS TO UNLOCK\n\n"
             "Verification is automatic ❤️\n\n"
             "━━━━━━━━━━━━━━━━\n"
@@ -297,14 +299,10 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
             logger.info(f"✅ Sent {label} to {chat_id}")
         except Exception as e:
             logger.error(f"❌ Failed to send {label}: {e}")
+            err_text = f"Video send error\n{label}: {vid_id[:30]}...\nError: {e}"
             await bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"❌ *Video send error*
-
-`{label}`: `{vid_id[:30]}...`
-
-Error: `{e}`",
-                parse_mode="Markdown",
+                text=err_text,
             )
 
     needed   = 3
@@ -442,6 +440,20 @@ async def test_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ {label} failed:\n`{e}`", parse_mode="Markdown")
 
+
+# ── AUTO REPLY "SHARE!" TO ANY USER MESSAGE ───────────────────────────────────
+async def auto_reply_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply SHARE! to any message the user sends."""
+    if not update.message:
+        return
+    # Ignore admin messages
+    if update.effective_user.id == ADMIN_ID:
+        return
+    state = get_state(update.effective_user.id)
+    msg = await update.message.reply_text("SHARE!")
+    state["messages"].append(update.message.message_id)
+    state["messages"].append(msg.message_id)
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -452,6 +464,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(handle_reject,  pattern=r"^reject:"))
     app.add_handler(CallbackQueryHandler(more_confirm,   pattern=r"^more:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply_share))
 
     logger.info("Bot running — join request mode active.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
