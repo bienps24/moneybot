@@ -1,17 +1,6 @@
 """
-Telegram Bot — Join Request Handler
-=====================================
-SETUP SA CHANNEL:
-  1. Settings → Manage Channel → Subscribers → Enable "Approve new members"
-  2. I-add ang bot bilang Admin ng channel
-  3. Bigyan ng permission: Invite Users via Link
-
-FLOW:
-  User nag-request na sumali → Bot auto-DM sa user (kahit hindi pa nagsimula ng bot)
-  Bot nagpadala ng promo message → Admin gets Approve/Reject notification
-  Admin taps ✅ → Bot approves join request + nagpadala ng content
-  Admin taps ❌ → Bot declines join request + nagpadala ng reject message
-
+Telegram Bot — Join Request + Admin Approval + Video Content
+=============================================================
 Railway env vars:
   BOT_TOKEN, ADMIN_ID, CHANNEL_ID, CHANNEL_LINK,
   PAYMENT_LINK, VIDEO_1_ID, VIDEO_2_ID, EXTRA_VIDEO_IDS
@@ -41,39 +30,31 @@ logger = logging.getLogger(__name__)
 # ── ENV VARS ──────────────────────────────────────────────────────────────────
 BOT_TOKEN       = os.environ["BOT_TOKEN"]
 ADMIN_ID        = int(os.environ["ADMIN_ID"])
-CHANNEL_ID      = int(os.environ["CHANNEL_ID"])   # e.g. -1001234567890
+CHANNEL_ID      = int(os.environ["CHANNEL_ID"])
 CHANNEL_LINK    = os.environ.get("CHANNEL_LINK", "https://t.me/+Xb2fi4Gr00c3MTdl")
 PAYMENT_LINK    = os.environ.get("PAYMENT_LINK", "https://t.me/your_payment_bot")
 VIDEO_1_ID      = os.environ.get("VIDEO_1_ID", "")
 VIDEO_2_ID      = os.environ.get("VIDEO_2_ID", "")
 EXTRA_VIDEO_IDS = os.environ.get("EXTRA_VIDEO_IDS", "").split(",")
 
-VIDEO_DELETE_DELAY = 30   # seconds
-CHAT_DELETE_DELAY  = 1800  # 30 minutes
+VIDEO_DELETE_DELAY = 30    # 30 seconds — videos auto delete
+CHAT_DELETE_DELAY  = 86400  # 1 day (24 hours) — full chat wipe both sides
 
 BOT_LINK = "https://t.me/Xetuu18bot?start=ref"
 
 # ── STATE ─────────────────────────────────────────────────────────────────────
 user_states: dict[int, dict] = {}
 
-
 def get_state(uid: int) -> dict:
     if uid not in user_states:
-        user_states[uid] = {
-            "messages":    [],
-            "phase":       "waiting",
-            "more_shares": 0,
-        }
+        user_states[uid] = {"messages": [], "phase": "waiting", "more_shares": 0}
     return user_states[uid]
 
-
 def share_url() -> str:
-    text = "join our exclusive group"
-    return f"https://t.me/share/url?url={quote(CHANNEL_LINK)}&text={quote(text)}"
-
+    return f"https://t.me/share/url?url={quote(CHANNEL_LINK)}&text={quote('join our exclusive group')}"
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
-async def schedule_delete(bot, chat_id: int, message_ids: list[int], delay: int):
+async def schedule_delete(bot, chat_id: int, message_ids: list, delay: int):
     await asyncio.sleep(delay)
     for mid in message_ids:
         try:
@@ -81,75 +62,65 @@ async def schedule_delete(bot, chat_id: int, message_ids: list[int], delay: int)
         except Exception:
             pass
 
+# ── PROMO MESSAGE (no buttons — waiting state) ────────────────────────────────
+PROMO_TEXT = (
+    "🚫 *CHANNEL IS PRIVATE*\n\n"
+    "🍌💦 *SHARE = CONTENT*\n\n"
+    "0 / 2 JOIN\n\n"
+    "(SHARE) CHANNEL — 55,568 VIDEOS\n\n"
+    "SHARE TO 2 GROUPS TO UNLOCK\n\n"
+    "Verification is automatic ❤️\n\n"
+    "━━━━━━━━━━━━━━━━\n"
+    "⏳ *Waiting for admin approval...*"
+)
 
 # ── JOIN REQUEST HANDLER ──────────────────────────────────────────────────────
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Triggered automatically when someone requests to join the channel.
-    Telegram allows bots to DM the user at this point even without /start.
-    """
     join_req = update.chat_join_request
     user     = join_req.from_user
-    chat_id  = user.id  # DM chat id = user id
 
-    # Ignore if not our channel
     if join_req.chat.id != CHANNEL_ID:
         return
 
-    logger.info(f"Join request from {user.id} ({user.full_name})")
+    logger.info(f"Join request: {user.id} ({user.full_name})")
 
     state = get_state(user.id)
     state["messages"]    = []
     state["phase"]       = "waiting"
     state["more_shares"] = 0
 
-    # 1️⃣ DM the user the promo message
+    # DM the user — no buttons, just promo message
     try:
         msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "🚫 *CHANNEL IS PRIVATE*\n\n"
-                "🍌💦 *SHARE \\= CONTENT*\n\n"
-                "0 / 2 JOIN\n\n"
-                "\\(SHARE\\) CHANNEL — 55,568 VIDEOS\n\n"
-                "SHARE TO 2 GROUPS TO UNLOCK\n\n"
-                "Verification is automatic ❤️\n\n"
-                "━━━━━━━━━━━━━━━━\n"
-                "⏳ *Waiting for admin approval\\.\\.\\.*"
-            ),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📤  SHARE LINK", url=share_url()),
-            ]])
+            chat_id=user.id,
+            text=PROMO_TEXT,
+            parse_mode="Markdown",
         )
         state["messages"].append(msg.message_id)
         logger.info(f"DM sent to {user.id}")
     except Exception as e:
-        logger.error(f"Failed to DM {user.id}: {e}")
+        logger.error(f"Cannot DM {user.id}: {e}")
         return
 
-    # 2️⃣ Notify admin with Approve / Reject buttons
-    username  = f"@{user.username}" if user.username else "_(no username)_"
-    full_name = user.full_name or "Unknown"
-
+    # Notify admin
+    uname = f"@{user.username}" if user.username else "_(no username)_"
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
             f"🔔 *New Join Request*\n\n"
-            f"👤 Name: {full_name}\n"
+            f"👤 Name: {user.full_name or 'Unknown'}\n"
             f"🆔 ID: `{user.id}`\n"
-            f"📎 Username: {username}\n\n"
-            f"Approve to let them in and send content?"
+            f"📎 Username: {uname}\n\n"
+            f"Approve to send them videos?"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅  APPROVE", callback_data=f"approve:{user.id}:{chat_id}"),
-            InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{chat_id}"),
+            InlineKeyboardButton("✅  APPROVE", callback_data=f"approve:{user.id}:{user.id}"),
+            InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{user.id}"),
         ]])
     )
 
-
-# ── /start (fallback para sa direct bot users) ───────────────────────────────
+# ── /start ────────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     chat_id = update.effective_chat.id
@@ -160,33 +131,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=(
-            "🚫 *CHANNEL IS PRIVATE*\n\n"
-            "🍌💦 *SHARE \\= CONTENT*\n\n"
-            "0 / 2 JOIN\n\n"
-            "\\(SHARE\\) CHANNEL — 55,568 VIDEOS\n\n"
-            "SHARE TO 2 GROUPS TO UNLOCK\n\n"
-            "Verification is automatic ❤️\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "⏳ *Waiting for admin approval\\.\\.\\.*"
-        ),
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📤  SHARE LINK", url=share_url()),
-        ]])
+        text=PROMO_TEXT,
+        parse_mode="Markdown",
     )
     state["messages"].append(msg.message_id)
 
-    username  = f"@{user.username}" if user.username else "_(no username)_"
-    full_name = user.full_name or "Unknown"
-
+    uname = f"@{user.username}" if user.username else "_(no username)_"
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
             f"🔔 *New Access Request*\n\n"
-            f"👤 Name: {full_name}\n"
+            f"👤 Name: {user.full_name or 'Unknown'}\n"
             f"🆔 ID: `{user.id}`\n"
-            f"📎 Username: {username}\n\n"
+            f"📎 Username: {uname}\n\n"
             f"Approve this user?"
         ),
         parse_mode="Markdown",
@@ -196,14 +153,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
     )
 
-
 # ── ADMIN: APPROVE ────────────────────────────────────────────────────────────
 async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("✅ Approved!")
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("⛔ Not authorized.", show_alert=True)
         return
 
     _, uid_str, chat_id_str = query.data.split(":")
@@ -212,28 +167,27 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state   = get_state(uid)
     state["phase"] = "content"
 
-    # Approve the join request in the channel
+    # Approve the channel join request
     try:
-        await context.bot.approve_chat_join_request(
-            chat_id=CHANNEL_ID,
-            user_id=uid,
-        )
+        await context.bot.approve_chat_join_request(chat_id=CHANNEL_ID, user_id=uid)
     except Exception as e:
-        logger.warning(f"Could not approve join request: {e}")
+        logger.warning(f"approve_chat_join_request: {e}")
 
     await query.edit_message_text(
-        query.message.text + "\n\n✅ *APPROVED — content sent.*",
+        query.message.text + "\n\n✅ *APPROVED — videos sent.*",
         parse_mode="Markdown",
     )
 
+    # Tell user they're approved
     msg = await context.bot.send_message(
         chat_id=chat_id,
-        text="✅ *You have been approved\\!* Sending your content now\\.\\.\\.",
-        parse_mode="MarkdownV2",
+        text="✅ *Approved! Sending your videos now...*",
+        parse_mode="Markdown",
     )
     state["messages"].append(msg.message_id)
-    await send_first_content(context.bot, chat_id, uid, state)
 
+    # Send the videos
+    await send_first_content(context.bot, chat_id, uid, state)
 
 # ── ADMIN: REJECT ─────────────────────────────────────────────────────────────
 async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,21 +195,16 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("❌ Rejected.")
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("⛔ Not authorized.", show_alert=True)
         return
 
     _, uid_str, chat_id_str = query.data.split(":")
     uid     = int(uid_str)
     chat_id = int(chat_id_str)
 
-    # Decline the join request in the channel
     try:
-        await context.bot.decline_chat_join_request(
-            chat_id=CHANNEL_ID,
-            user_id=uid,
-        )
+        await context.bot.decline_chat_join_request(chat_id=CHANNEL_ID, user_id=uid)
     except Exception as e:
-        logger.warning(f"Could not decline join request: {e}")
+        logger.warning(f"decline_chat_join_request: {e}")
 
     await query.edit_message_text(
         query.message.text + "\n\n❌ *REJECTED.*",
@@ -267,16 +216,15 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id,
         text=(
             "❌ *Access Denied*\n\n"
-            "You were not approved at this time\\.\n\n"
+            "You were not approved.\n\n"
             "💳 You can still get access by paying:"
         ),
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK),
         ]])
     )
     state["messages"].append(msg.message_id)
-
 
 # ── SEND FIRST 2 VIDEOS ───────────────────────────────────────────────────────
 async def send_first_content(bot, chat_id: int, uid: int, state: dict):
@@ -284,8 +232,8 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
 
     for label, vid_id in [("VIDEO_1_ID", VIDEO_1_ID), ("VIDEO_2_ID", VIDEO_2_ID)]:
         if not vid_id:
-            logger.warning(f"{label} is empty — skipping")
-            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ {label} is not set in Railway Variables!")
+            logger.warning(f"{label} is empty")
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ {label} not set in Railway Variables!")
             continue
         try:
             msg = await bot.send_video(
@@ -298,23 +246,20 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
             state["messages"].append(msg.message_id)
             logger.info(f"✅ Sent {label} to {chat_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to send {label}: {e}")
-            err_text = f"Video send error\n{label}: {vid_id[:30]}...\nError: {e}"
-            await bot.send_message(
-                chat_id=ADMIN_ID,
-                text=err_text,
-            )
+            err = f"Video send error {label}: {e}"
+            logger.error(err)
+            await bot.send_message(chat_id=ADMIN_ID, text=f"❌ {err}")
 
-    needed   = 3
+    # Buttons sent SEPARATELY — SHARE FOR MORE + PAY only
     info_msg = await bot.send_message(
         chat_id=chat_id,
         text=(
             "🔥 *Want MORE videos?*\n\n"
-            f"📤 Share to *{needed} groups* to unlock more\n\n"
+            "📤 Share to groups to unlock more\n\n"
             "─────────────────\n"
-            "💳 Or pay for *unlimited access*"
+            "💳 Or pay for unlimited access"
         ),
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
             [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
@@ -322,11 +267,10 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
     )
     state["messages"].append(info_msg.message_id)
 
+    # 🗑 Videos delete after 30s
     asyncio.create_task(schedule_delete(bot, chat_id, video_msgs, VIDEO_DELETE_DELAY))
-    asyncio.create_task(
-        schedule_delete(bot, chat_id, list(state["messages"]), CHAT_DELETE_DELAY)
-    )
-
+    # 🗑 Full chat wipe after 30 min
+    asyncio.create_task(schedule_delete(bot, chat_id, list(state["messages"]), CHAT_DELETE_DELAY))
 
 # ── MORE CONTENT ──────────────────────────────────────────────────────────────
 async def more_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -349,20 +293,19 @@ async def more_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             (
                 "🔥 *Want MORE videos?*\n\n"
-                f"📤 Share to *{needed} groups* to unlock more\n\n"
+                f"📤 Share to groups to unlock more ({n}/{needed})\n\n"
                 "─────────────────\n"
-                "💳 Or pay for *unlimited access*"
+                "💳 Or pay for unlimited access"
             ),
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
                 [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
             ])
         )
     else:
-        await query.edit_message_text("✅ *Unlocking more content\\!*", parse_mode="MarkdownV2")
+        await query.edit_message_text("✅ *Unlocking more content!*", parse_mode="Markdown")
         await send_more_content(context.bot, chat_id, uid, state)
-
 
 # ── SEND EXTRA VIDEOS ─────────────────────────────────────────────────────────
 async def send_more_content(bot, chat_id: int, uid: int, state: dict):
@@ -371,11 +314,7 @@ async def send_more_content(bot, chat_id: int, uid: int, state: dict):
     videos = [v.strip() for v in EXTRA_VIDEO_IDS if v.strip()]
 
     if not videos:
-        msg = await bot.send_message(
-            chat_id=chat_id,
-            text="🔥 More videos coming soon\\! Stay tuned\\.",
-            parse_mode="MarkdownV2",
-        )
+        msg = await bot.send_message(chat_id=chat_id, text="🔥 More videos coming soon! Stay tuned.")
         extra_msgs.append(msg.message_id)
         state["messages"].append(msg.message_id)
     else:
@@ -392,16 +331,15 @@ async def send_more_content(bot, chat_id: int, uid: int, state: dict):
             except Exception as e:
                 logger.error(f"Extra video error: {e}")
 
-    needed   = 3
     info_msg = await bot.send_message(
         chat_id=chat_id,
         text=(
             "🔥 *Enjoyed the content?*\n\n"
-            f"📤 Share *{needed}x* more to keep unlocking\n\n"
+            "📤 Share more to keep unlocking\n\n"
             "─────────────────\n"
-            "💳 Or go unlimited with *paid access*"
+            "💳 Or go unlimited with paid access"
         ),
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
             [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
@@ -410,24 +348,27 @@ async def send_more_content(bot, chat_id: int, uid: int, state: dict):
     state["messages"].append(info_msg.message_id)
 
     asyncio.create_task(schedule_delete(bot, chat_id, extra_msgs, VIDEO_DELETE_DELAY))
-    asyncio.create_task(
-        schedule_delete(bot, chat_id, list(state["messages"]), CHAT_DELETE_DELAY)
-    )
+    asyncio.create_task(schedule_delete(bot, chat_id, list(state["messages"]), CHAT_DELETE_DELAY))
 
+# ── AUTO REPLY "SHARE!" ───────────────────────────────────────────────────────
+async def auto_reply_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_user.id == ADMIN_ID:
+        return
+    state = get_state(update.effective_user.id)
+    msg = await update.message.reply_text("SHARE!")
+    state["messages"].append(update.message.message_id)
+    state["messages"].append(msg.message_id)
 
-
-
-# ── /testvideo (admin only — para ma-test ang video) ─────────────────────────
+# ── /testvideo (admin only) ───────────────────────────────────────────────────
 async def test_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     chat_id = update.effective_chat.id
-
-    await update.message.reply_text("🧪 Testing video send...")
+    await update.message.reply_text("🧪 Testing videos...")
 
     for label, vid_id in [("VIDEO_1_ID", VIDEO_1_ID), ("VIDEO_2_ID", VIDEO_2_ID)]:
         if not vid_id:
-            await update.message.reply_text(f"❌ {label} is empty sa Railway Variables!")
+            await update.message.reply_text(f"❌ {label} is EMPTY in Railway Variables!")
             continue
         try:
             await context.bot.send_video(
@@ -438,21 +379,7 @@ async def test_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(f"✅ {label} — OK!")
         except Exception as e:
-            await update.message.reply_text(f"❌ {label} failed:\n`{e}`", parse_mode="Markdown")
-
-
-# ── AUTO REPLY "SHARE!" TO ANY USER MESSAGE ───────────────────────────────────
-async def auto_reply_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reply SHARE! to any message the user sends."""
-    if not update.message:
-        return
-    # Ignore admin messages
-    if update.effective_user.id == ADMIN_ID:
-        return
-    state = get_state(update.effective_user.id)
-    msg = await update.message.reply_text("SHARE!")
-    state["messages"].append(update.message.message_id)
-    state["messages"].append(msg.message_id)
+            await update.message.reply_text(f"❌ {label} FAILED:\n{e}")
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
@@ -466,9 +393,8 @@ def main():
     app.add_handler(CallbackQueryHandler(more_confirm,   pattern=r"^more:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply_share))
 
-    logger.info("Bot running — join request mode active.")
+    logger.info("Bot running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
