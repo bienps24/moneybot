@@ -184,7 +184,7 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("💳  PAY FOR ACCESS", url=PAYMENT_LINK),
+            InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK),
         ]])
     )
     state["messages"].append(msg.message_id)
@@ -221,8 +221,7 @@ async def send_first_content(bot, chat_id: int, uid: int, state: dict):
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
-            [InlineKeyboardButton(f"✅  I SHARED  (0/{needed})", callback_data=f"more:{uid}:{chat_id}")],
-            [InlineKeyboardButton("💳  PAY FOR ACCESS", url=PAYMENT_LINK)],
+            [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
         ])
     )
     state["messages"].append(info_msg.message_id)
@@ -264,8 +263,7 @@ async def more_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
-                [InlineKeyboardButton(f"✅  I SHARED  ({n}/{needed})", callback_data=f"more:{uid}:{chat_id}")],
-                [InlineKeyboardButton("💳  PAY FOR ACCESS", url=PAYMENT_LINK)],
+                [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
             ])
         )
     else:
@@ -313,8 +311,7 @@ async def send_more_content(bot, chat_id: int, uid: int, state: dict):
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
-            [InlineKeyboardButton(f"✅  I SHARED  (0/{needed})", callback_data=f"more:{uid}:{chat_id}")],
-            [InlineKeyboardButton("💳  PAY FOR ACCESS", url=PAYMENT_LINK)],
+            [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
         ])
     )
     state["messages"].append(info_msg.message_id)
