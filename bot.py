@@ -1,13 +1,18 @@
 """
-Telegram Bot — Auto DM on Channel Join + Admin Approval
-=========================================================
-Flow:
-  User joins channel → Bot auto-DMs them the promo message
-  Admin sees notification → Taps ✅ APPROVE or ❌ REJECT
-  If bot cannot DM (user never started bot) → Bot posts in channel
-  tagging the user to start the bot first
+Telegram Bot — Join Request Handler
+=====================================
+SETUP SA CHANNEL:
+  1. Settings → Manage Channel → Subscribers → Enable "Approve new members"
+  2. I-add ang bot bilang Admin ng channel
+  3. Bigyan ng permission: Invite Users via Link
 
-Railway env vars needed:
+FLOW:
+  User nag-request na sumali → Bot auto-DM sa user (kahit hindi pa nagsimula ng bot)
+  Bot nagpadala ng promo message → Admin gets Approve/Reject notification
+  Admin taps ✅ → Bot approves join request + nagpadala ng content
+  Admin taps ❌ → Bot declines join request + nagpadala ng reject message
+
+Railway env vars:
   BOT_TOKEN, ADMIN_ID, CHANNEL_ID, CHANNEL_LINK,
   PAYMENT_LINK, VIDEO_1_ID, VIDEO_2_ID, EXTRA_VIDEO_IDS
 """
@@ -16,15 +21,14 @@ import logging
 import os
 from urllib.parse import quote
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ChatMemberHandler,
+    ChatJoinRequestHandler,
     ContextTypes,
 )
-from telegram.error import Forbidden, BadRequest
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -32,22 +36,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── ENV VARS — set all of these in Railway → Variables ────────────────────────
+# ── ENV VARS ──────────────────────────────────────────────────────────────────
 BOT_TOKEN       = os.environ["BOT_TOKEN"]
 ADMIN_ID        = int(os.environ["ADMIN_ID"])
-CHANNEL_ID      = int(os.environ["CHANNEL_ID"])        # e.g. -1001234567890
+CHANNEL_ID      = int(os.environ["CHANNEL_ID"])   # e.g. -1001234567890
 CHANNEL_LINK    = os.environ.get("CHANNEL_LINK", "https://t.me/+Xb2fi4Gr00c3MTdl")
 PAYMENT_LINK    = os.environ.get("PAYMENT_LINK", "https://t.me/your_payment_bot")
 VIDEO_1_ID      = os.environ.get("VIDEO_1_ID", "")
 VIDEO_2_ID      = os.environ.get("VIDEO_2_ID", "")
 EXTRA_VIDEO_IDS = os.environ.get("EXTRA_VIDEO_IDS", "").split(",")
 
-VIDEO_DELETE_DELAY = 30   # seconds before videos are deleted
-CHAT_DELETE_DELAY  = 120  # seconds before entire chat is wiped
+VIDEO_DELETE_DELAY = 30   # seconds
+CHAT_DELETE_DELAY  = 120  # seconds
 
 BOT_LINK = "https://t.me/Xetuu18bot?start=ref"
 
-# ── IN-MEMORY STATE ───────────────────────────────────────────────────────────
+# ── STATE ─────────────────────────────────────────────────────────────────────
 user_states: dict[int, dict] = {}
 
 
@@ -76,14 +80,83 @@ async def schedule_delete(bot, chat_id: int, message_ids: list[int], delay: int)
             pass
 
 
-async def greet_user(bot, user, chat_id: int):
-    """Send the promo message to the user and notify admin."""
+# ── JOIN REQUEST HANDLER ──────────────────────────────────────────────────────
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Triggered automatically when someone requests to join the channel.
+    Telegram allows bots to DM the user at this point even without /start.
+    """
+    join_req = update.chat_join_request
+    user     = join_req.from_user
+    chat_id  = user.id  # DM chat id = user id
+
+    # Ignore if not our channel
+    if join_req.chat.id != CHANNEL_ID:
+        return
+
+    logger.info(f"Join request from {user.id} ({user.full_name})")
+
     state = get_state(user.id)
     state["messages"]    = []
     state["phase"]       = "waiting"
     state["more_shares"] = 0
 
-    msg = await bot.send_message(
+    # 1️⃣ DM the user the promo message
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🚫 *CHANNEL IS PRIVATE*\n\n"
+                "🍌💦 *SHARE \\= CONTENT*\n\n"
+                "0 / 2 JOIN\n\n"
+                "\\(SHARE\\) CHANNEL \\— *55,568 VIDEOS*\n\n"
+                "SHARE TO 2 GROUPS TO UNLOCK\n\n"
+                "Verification is automatic ❤️\n\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "⏳ *Waiting for admin approval\\.\\.\\.*"
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📤  SHARE LINK", url=share_url()),
+            ]])
+        )
+        state["messages"].append(msg.message_id)
+        logger.info(f"DM sent to {user.id}")
+    except Exception as e:
+        logger.error(f"Failed to DM {user.id}: {e}")
+        return
+
+    # 2️⃣ Notify admin with Approve / Reject buttons
+    username  = f"@{user.username}" if user.username else "_(no username)_"
+    full_name = user.full_name or "Unknown"
+
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"🔔 *New Join Request*\n\n"
+            f"👤 Name: {full_name}\n"
+            f"🆔 ID: `{user.id}`\n"
+            f"📎 Username: {username}\n\n"
+            f"Approve to let them in and send content?"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅  APPROVE", callback_data=f"approve:{user.id}:{chat_id}"),
+            InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{chat_id}"),
+        ]])
+    )
+
+
+# ── /start (fallback para sa direct bot users) ───────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user    = update.effective_user
+    chat_id = update.effective_chat.id
+    state   = get_state(user.id)
+    state["messages"]    = [update.message.message_id]
+    state["phase"]       = "waiting"
+    state["more_shares"] = 0
+
+    msg = await context.bot.send_message(
         chat_id=chat_id,
         text=(
             "🚫 *CHANNEL IS PRIVATE*\n\n"
@@ -105,14 +178,14 @@ async def greet_user(bot, user, chat_id: int):
     username  = f"@{user.username}" if user.username else "_(no username)_"
     full_name = user.full_name or "Unknown"
 
-    await bot.send_message(
+    await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
             f"🔔 *New Access Request*\n\n"
             f"👤 Name: {full_name}\n"
             f"🆔 ID: `{user.id}`\n"
             f"📎 Username: {username}\n\n"
-            f"Do you want to approve this user?"
+            f"Approve this user?"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
@@ -120,67 +193,6 @@ async def greet_user(bot, user, chat_id: int):
             InlineKeyboardButton("❌  REJECT",  callback_data=f"reject:{user.id}:{chat_id}"),
         ]])
     )
-    logger.info(f"Greeted {user.id} ({full_name})")
-
-
-# ── NEW CHANNEL MEMBER HANDLER ────────────────────────────────────────────────
-async def new_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggered when someone joins the channel."""
-    result: ChatMemberUpdated = update.chat_member
-
-    # Only care about our channel
-    if result.chat.id != CHANNEL_ID:
-        return
-
-    old_status = result.old_chat_member.status
-    new_status = result.new_chat_member.status
-
-    # Detect join: was not member, now is member
-    joined = (
-        old_status in ("left", "kicked", "restricted")
-        and new_status in ("member", "administrator", "creator")
-    )
-    if not joined:
-        return
-
-    user = result.new_chat_member.user
-    if user.is_bot:
-        return
-
-    logger.info(f"User {user.id} ({user.full_name}) joined channel — sending DM.")
-
-    try:
-        # Try to DM the user directly
-        await greet_user(context.bot, user, user.id)
-
-    except (Forbidden, BadRequest):
-        # User never started the bot — cannot DM them
-        # Post in channel tagging them to start the bot
-        logger.warning(f"Cannot DM {user.id} — posting in channel instead.")
-        try:
-            msg = await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=(
-                    f"👋 Welcome [{user.full_name}](tg://user?id={user.id})\\!\n\n"
-                    f"To receive your content, please start our bot first:\n"
-                    f"👉 [Click here to start]({BOT_LINK})"
-                ),
-                parse_mode="MarkdownV2",
-            )
-            # Auto-delete the welcome message after 60 seconds
-            asyncio.create_task(
-                schedule_delete(context.bot, CHANNEL_ID, [msg.message_id], 60)
-            )
-        except Exception as e:
-            logger.error(f"Channel post error: {e}")
-
-
-# ── /start (also handles users who click the bot link) ───────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    chat_id = update.effective_chat.id
-
-    await greet_user(context.bot, user, chat_id)
 
 
 # ── ADMIN: APPROVE ────────────────────────────────────────────────────────────
@@ -197,6 +209,15 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = int(chat_id_str)
     state   = get_state(uid)
     state["phase"] = "content"
+
+    # Approve the join request in the channel
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=CHANNEL_ID,
+            user_id=uid,
+        )
+    except Exception as e:
+        logger.warning(f"Could not approve join request: {e}")
 
     await query.edit_message_text(
         query.message.text + "\n\n✅ *APPROVED — content sent.*",
@@ -224,6 +245,15 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, uid_str, chat_id_str = query.data.split(":")
     uid     = int(uid_str)
     chat_id = int(chat_id_str)
+
+    # Decline the join request in the channel
+    try:
+        await context.bot.decline_chat_join_request(
+            chat_id=CHANNEL_ID,
+            user_id=uid,
+        )
+    except Exception as e:
+        logger.warning(f"Could not decline join request: {e}")
 
     await query.edit_message_text(
         query.message.text + "\n\n❌ *REJECTED.*",
@@ -379,12 +409,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(ChatMemberHandler(new_channel_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatJoinRequestHandler(handle_join_request))
     app.add_handler(CallbackQueryHandler(handle_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(handle_reject,  pattern=r"^reject:"))
     app.add_handler(CallbackQueryHandler(more_confirm,   pattern=r"^more:"))
 
-    logger.info("Bot running — channel join detection active.")
+    logger.info("Bot running — join request mode active.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
