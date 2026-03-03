@@ -280,19 +280,32 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_first_content(bot, chat_id: int, uid: int, state: dict):
     video_msgs = []
 
-    for vid_id in [VIDEO_1_ID, VIDEO_2_ID]:
-        if vid_id:
-            try:
-                msg = await bot.send_video(
-                    chat_id=chat_id,
-                    video=vid_id,
-                    protect_content=True,
-                    supports_streaming=True,
-                )
-                video_msgs.append(msg.message_id)
-                state["messages"].append(msg.message_id)
-            except Exception as e:
-                logger.error(f"Video send error: {e}")
+    for label, vid_id in [("VIDEO_1_ID", VIDEO_1_ID), ("VIDEO_2_ID", VIDEO_2_ID)]:
+        if not vid_id:
+            logger.warning(f"{label} is empty — skipping")
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ {label} is not set in Railway Variables!")
+            continue
+        try:
+            msg = await bot.send_video(
+                chat_id=chat_id,
+                video=vid_id,
+                protect_content=True,
+                supports_streaming=True,
+            )
+            video_msgs.append(msg.message_id)
+            state["messages"].append(msg.message_id)
+            logger.info(f"✅ Sent {label} to {chat_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send {label}: {e}")
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"❌ *Video send error*
+
+`{label}`: `{vid_id[:30]}...`
+
+Error: `{e}`",
+                parse_mode="Markdown",
+            )
 
     needed   = 3
     info_msg = await bot.send_message(
@@ -404,11 +417,37 @@ async def send_more_content(bot, chat_id: int, uid: int, state: dict):
     )
 
 
+
+
+# ── /testvideo (admin only — para ma-test ang video) ─────────────────────────
+async def test_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    chat_id = update.effective_chat.id
+
+    await update.message.reply_text("🧪 Testing video send...")
+
+    for label, vid_id in [("VIDEO_1_ID", VIDEO_1_ID), ("VIDEO_2_ID", VIDEO_2_ID)]:
+        if not vid_id:
+            await update.message.reply_text(f"❌ {label} is empty sa Railway Variables!")
+            continue
+        try:
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=vid_id,
+                protect_content=True,
+                supports_streaming=True,
+            )
+            await update.message.reply_text(f"✅ {label} — OK!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ {label} failed:\n`{e}`", parse_mode="Markdown")
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("testvideo", test_video))
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
     app.add_handler(CallbackQueryHandler(handle_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(handle_reject,  pattern=r"^reject:"))
