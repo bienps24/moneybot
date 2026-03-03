@@ -37,8 +37,8 @@ VIDEO_1_ID      = os.environ.get("VIDEO_1_ID", "")
 VIDEO_2_ID      = os.environ.get("VIDEO_2_ID", "")
 EXTRA_VIDEO_IDS = os.environ.get("EXTRA_VIDEO_IDS", "").split(",")
 
-VIDEO_DELETE_DELAY = 30    # 30 seconds — videos auto delete
-CHAT_DELETE_DELAY  = 86400  # 1 day (24 hours) — full chat wipe both sides
+VIDEO_DELETE_DELAY = 60    # 1 minute — videos auto delete
+CHAT_DELETE_DELAY  = 1200  # 20 minutes — full chat wipe both sides
 
 BOT_LINK = "https://t.me/Xetuu18bot?start=ref"
 
@@ -68,7 +68,7 @@ PROMO_TEXT = (
     "🍌💦 *SHARE = CONTENT*\n\n"
     "0 / 2 JOIN\n\n"
     "(SHARE) CHANNEL — 55,568 VIDEOS\n\n"
-    "SHARE TO 2 GROUPS TO UNLOCK\n\n"
+    "SHARE TO 2 GROUPS TO UNLOCK more free videos\n\n"
     "Verification is automatic ❤️\n\n"
     "━━━━━━━━━━━━━━━━\n"
     "⏳ *Waiting for admin approval...*"
