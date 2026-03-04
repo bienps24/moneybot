@@ -101,7 +101,7 @@ async def send_content(bot, chat_id: int, uid: int, state: dict):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📤  SHARE FOR MORE", url=share_url())],
-            [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱1,499", url=PAYMENT_LINK)],
+            [InlineKeyboardButton("💳  PAY FOR ACCESS — ₱999", url=PAYMENT_LINK)],
         ])
     )
     state["messages"].append(info_msg.message_id)
